@@ -44,17 +44,32 @@ pip install -r requirements.txt
 python main.py
 ```
 
-## Manually Run Window-Finder
+## Troubleshooting and Verification
 
-```
+### Manual Verification
+You can run the detection and extraction scripts on any screenshot to see the system's performance:
+
+```bash
+# Test window detection only
 PYENV_VERSION=coh python tools/test_window_detection.py <path_to_screenshot>
-```
 
-## Manually Run Data-Extractor
-
-```
+# Test full data extraction (bars, OCR, etc.)
 PYENV_VERSION=coh python tools/test_data_extraction.py <path_to_screenshot>
 ```
+
+### Automated Testing
+Automated tests verify that the system is resilient to different resolutions and UI layouts.
+
+```bash
+# Run all tests
+PYENV_VERSION=coh pytest
+
+# Run perception tests only (includes resolution-robustness checks)
+PYENV_VERSION=coh pytest tests/test_perception_dynamic.py
+```
+
+> [!IMPORTANT]
+> **Dependencies**: Automated testing requires `pytesseract` and a local installation of `Tesseract OCR`. On Linux, you can install it via `sudo apt install tesseract-ocr`.
 
 ## Extensibility
 
