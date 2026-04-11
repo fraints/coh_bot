@@ -8,6 +8,7 @@ template matching and color analysis.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -16,6 +17,7 @@ import mss
 import numpy as np
 
 import config
+from bot.perception.window_detector import WindowDetector
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +48,72 @@ class ScreenReader:
         self._sct = mss.mss()
         self._monitor = self._sct.monitors[config.MONITOR_INDEX]
         self._templates: dict[str, Optional[np.ndarray]] = {}
+        
+        # Initialize dynamic window detector
+        ref_dir = os.path.join(os.path.dirname(__file__), "..", "..", "tests", "screenshots", "references")
+        self._window_detector = WindowDetector(ref_dir)
+        self._window_cache: dict[str, Optional[tuple[int, int, int, int]]] = {
+            "player": None,
+            "target": None
+        }
+        
         logger.info("ScreenReader initialised (monitor %d).", config.MONITOR_INDEX)
+
+    def calibrate(self, screenshot: Optional[np.ndarray] = None) -> None:
+        """Find window locations and update the region cache."""
+        if screenshot is None:
+            screenshot = self._grab_full()
+            
+        self._window_cache["player"] = self._window_detector.find_player_window(screenshot)
+        self._window_cache["target"] = self._window_detector.find_target_window(screenshot)
+        
+        if self._window_cache["player"]:
+            logger.info("Calibrated Player window: %s", self._window_cache["player"])
+        if self._window_cache["target"]:
+            logger.info("Calibrated Target window: %s", self._window_cache["target"])
+
+    def _grab_full(self) -> np.ndarray:
+        """Grab the full game window/monitor."""
+        return self._grab(self._monitor["left"], self._monitor["top"], self._monitor["width"], self._monitor["height"])
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def capture(self) -> GameState:
         """Capture the current screen and return a fresh ``GameState``."""
+        # Ensure we have calibrated window locations
+        if not self._window_cache["player"] or not self._window_cache["target"]:
+            self.calibrate()
+
         raw: dict[str, np.ndarray] = {}
-        for name, (left, top, w, h) in config.REGIONS.items():
-            raw[name] = self._grab(left, top, w, h)
+        
+        # Player window regions
+        if self._window_cache["player"]:
+            px, py, pw, ph = self._window_cache["player"]
+            # health_bar is usually at the top of the player window
+            # Based on references, it's inside the player window.
+            # We'll grab the whole player window for now and let the parsers handle it,
+            # or we can define offsets.
+            # For now, let's just grab the player window as 'health_bar' for the existing logic
+            raw["health_bar"] = self._grab(px, py, pw, ph)
+        else:
+            # Fallback to config if not found
+            l, t, w, h = config.REGIONS["health_bar"]
+            raw["health_bar"] = self._grab(l, t, w, h)
+
+        # Target window regions
+        if self._window_cache["target"]:
+            tx, ty, tw, th = self._window_cache["target"]
+            raw["target_name"] = self._grab(tx, ty, tw, th) # Target name region
+            raw["target_health"] = self._grab(tx, ty, tw, th) # Using same region for now
+        else:
+            l, t, w, h = config.REGIONS["target_name"]
+            raw["target_name"] = self._grab(l, t, w, h)
+            l, t, w, h = config.REGIONS["target_health"]
+            raw["target_health"] = self._grab(l, t, w, h)
+
+        # Enemy nearby (center area)
+        l, t, w, h = config.REGIONS["enemy_nearby"]
+        raw["enemy_nearby"] = self._grab(l, t, w, h)
 
         state = GameState(
             player_hp_pct=self._parse_hp_bar(raw.get("health_bar")),
