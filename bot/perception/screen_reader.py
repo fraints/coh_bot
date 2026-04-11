@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict, List, Any
 
 import cv2
 import mss
@@ -18,6 +18,7 @@ import numpy as np
 
 import config
 from bot.perception.window_detector import WindowDetector
+from bot.perception.data_extractor import DataExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +26,19 @@ logger = logging.getLogger(__name__)
 @dataclass
 class GameState:
     """Snapshot of the game state as perceived from the screen."""
-    player_hp_pct: float = 1.0          # 0.0 – 1.0
+    # Player data
+    player_hp_pct: float = 1.0
+    player_endurance_pct: float = 1.0
+    
+    # Target data
     has_target: bool = False
-    target_hp_pct: float = 1.0          # 0.0 – 1.0
+    target_type: str = "target__none"
+    target_hp_pct: float = 1.0
+    target_endurance_pct: float = 1.0
+    target_name: str = ""
+    target_details: Dict[str, Any] = field(default_factory=dict)
+    
+    # Overall flags
     enemy_visible: bool = False
     raw_regions: dict = field(default_factory=dict, repr=False)
 
@@ -49,13 +60,17 @@ class ScreenReader:
         self._monitor = self._sct.monitors[config.MONITOR_INDEX]
         self._templates: dict[str, Optional[np.ndarray]] = {}
         
-        # Initialize dynamic window detector
+        # Initialize dynamic window detector and data extractor
         ref_dir = os.path.join(os.path.dirname(__file__), "..", "..", "tests", "screenshots", "references")
         self._window_detector = WindowDetector(ref_dir)
+        self._data_extractor = DataExtractor()
         self._window_cache: dict[str, Optional[tuple[int, int, int, int]]] = {
             "player": None,
             "target": None
         }
+        
+        # Track the last target template matched to determine type
+        self._last_target_template: str = "target__none"
         
         logger.info("ScreenReader initialised (monitor %d).", config.MONITOR_INDEX)
 
@@ -80,49 +95,52 @@ class ScreenReader:
 
     def capture(self) -> GameState:
         """Capture the current screen and return a fresh ``GameState``."""
-        # Ensure we have calibrated window locations
-        if not self._window_cache["player"] or not self._window_cache["target"]:
-            self.calibrate()
+        # Update window locations
+        self.calibrate()
 
         raw: dict[str, np.ndarray] = {}
-        
-        # Player window regions
-        if self._window_cache["player"]:
-            px, py, pw, ph = self._window_cache["player"]
-            # health_bar is usually at the top of the player window
-            # Based on references, it's inside the player window.
-            # We'll grab the whole player window for now and let the parsers handle it,
-            # or we can define offsets.
-            # For now, let's just grab the player window as 'health_bar' for the existing logic
-            raw["health_bar"] = self._grab(px, py, pw, ph)
-        else:
-            # Fallback to config if not found
-            l, t, w, h = config.REGIONS["health_bar"]
-            raw["health_bar"] = self._grab(l, t, w, h)
+        state = GameState()
 
-        # Target window regions
-        if self._window_cache["target"]:
-            tx, ty, tw, th = self._window_cache["target"]
-            raw["target_name"] = self._grab(tx, ty, tw, th) # Target name region
-            raw["target_health"] = self._grab(tx, ty, tw, th) # Using same region for now
-        else:
-            l, t, w, h = config.REGIONS["target_name"]
-            raw["target_name"] = self._grab(l, t, w, h)
-            l, t, w, h = config.REGIONS["target_health"]
-            raw["target_health"] = self._grab(l, t, w, h)
+        # Extract Player Data
+        p_cache = self._window_cache["player"]
+        if p_cache:
+            px, py, pw, ph = p_cache
+            player_img = self._grab(px, py, pw, ph)
+            raw["player_window"] = player_img
+            
+            p_data = self._data_extractor.extract_player_data(player_img)
+            state.player_hp_pct = p_data.get("hp_pct", 1.0)
+            state.player_endurance_pct = p_data.get("endurance_pct", 1.0)
 
-        # Enemy nearby (center area)
-        l, t, w, h = config.REGIONS["enemy_nearby"]
-        raw["enemy_nearby"] = self._grab(l, t, w, h)
+        # Extract Target Data
+        t_cache = self._window_cache["target"]
+        if t_cache:
+            tx, ty, tw, th = t_cache
+            target_img = self._grab(tx, ty, tw, th)
+            raw["target_window"] = target_img
+            
+            # Use WindowDetector to find the specific target type
+            target_type = self._window_detector._last_matched_target_type if hasattr(self._window_detector, "_last_matched_target_type") else "target__unknown"
+            state.target_type = target_type
+            state.has_target = (target_type != "target__none")
 
-        state = GameState(
-            player_hp_pct=self._parse_hp_bar(raw.get("health_bar")),
-            has_target=self._detect_target(raw.get("target_name")),
-            target_hp_pct=self._parse_hp_bar(raw.get("target_health")),
-            enemy_visible=self._detect_enemy(raw.get("enemy_nearby")),
-            raw_regions=raw,
-        )
-        logger.debug("GameState: %s", state)
+            if state.has_target:
+                t_data = self._data_extractor.extract_target_data(target_img, target_type)
+                state.target_hp_pct = t_data.get("hp_pct", 1.0)
+                state.target_endurance_pct = t_data.get("endurance_pct", 1.0)
+                state.target_name = t_data.get("name", "")
+                state.target_details = t_data
+
+        # Enemy nearby (center area) - legacy logic
+        enemy_reg = config.REGIONS.get("enemy_nearby")
+        if enemy_reg:
+            l, t, w, h = enemy_reg
+            if w > 0:
+                raw["enemy_nearby"] = self._grab(l, t, w, h)
+                state.enemy_visible = self._detect_enemy(raw.get("enemy_nearby"))
+
+        state.raw_regions = raw
+        logger.debug("GameState updated")
         return state
 
     def load_template(self, name: str, path: str) -> None:

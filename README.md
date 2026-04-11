@@ -44,6 +44,18 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Manually Run Window-Finder
+
+```
+PYENV_VERSION=coh python tools/test_window_detection.py <path_to_screenshot>
+```
+
+## Manually Run Data-Extractor
+
+```
+PYENV_VERSION=coh python tools/test_data_extraction.py <path_to_screenshot>
+```
+
 ## Extensibility
 
 - **New states:** Add a class to `bot/brain/states.py` inheriting `BaseState` and register it in `fsm.py`.

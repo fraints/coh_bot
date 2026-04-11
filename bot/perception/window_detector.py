@@ -15,6 +15,7 @@ class WindowDetector:
     def __init__(self, references_dir: str):
         self.references_dir = references_dir
         self.templates: Dict[str, np.ndarray] = {}
+        self._last_matched_target_type: str = "target__none"
         self._load_all_templates()
 
     def _load_all_templates(self):
@@ -69,6 +70,7 @@ class WindowDetector:
         offset_x, offset_y = 0, 0
 
         best_match = None
+        best_type = "target__none"
         max_confidence = -1.0
 
         target_templates = [k for k in self.templates.keys() if k.startswith("target__")]
@@ -78,10 +80,14 @@ class WindowDetector:
                 loc, confidence = match_data
                 if confidence > max_confidence:
                     max_confidence = confidence
+                    best_type = t_name.replace(".png", "")
                     best_match = (loc[0] + offset_x, loc[1] + offset_y, self.templates[t_name].shape[1], self.templates[t_name].shape[0])
 
         if max_confidence >= 0.65:
+            self._last_matched_target_type = best_type
             return best_match
+        
+        self._last_matched_target_type = "target__none"
         return None
 
     def _get_best_match(self, roi: np.ndarray, template: np.ndarray) -> Optional[Tuple[Tuple[int, int], float]]:
