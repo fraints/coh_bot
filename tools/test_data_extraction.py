@@ -8,6 +8,7 @@ import numpy as np
 sys.path.append(os.getcwd())
 
 from bot.perception.screen_reader import ScreenReader
+from bot.perception.types import TeamMember
 from bot.perception.window_detector import WindowDetector
 from bot.perception.data_extractor import DataExtractor
 
@@ -29,63 +30,54 @@ def test_extraction(image_path):
     # Find windows
     player_box = detector.find_player_window(screenshot)
     target_box = detector.find_target_window(screenshot)
+    team_box = detector.find_team_window(screenshot)
     target_type = detector._last_matched_target_type
 
     results = {
         "player": {},
-        "target": {}
+        "target": {},
+        "team": []
     }
 
     debug_img = screenshot.copy()
 
-    # Extract Player Data
+    # 1. Player Data
     if player_box:
         x, y, w, h = player_box
-        player_img = screenshot[y:y+h, x:x+w]
-        p_data = extractor.extract_player_data(player_img)
+        p_data = extractor.extract_player_data(screenshot[y:y+h, x:x+w])
         results["player"] = p_data
-        
-        # Draw Player Box (Neon Green)
         cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
         cv2.putText(debug_img, "Player", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        
-        # Draw Bar Boxes
-        if p_data.get("debug_boxes"):
-            hp_bar = p_data["debug_boxes"].get("hp_bar")
-            if hp_bar:
-                bx, by, bw, bh = hp_bar
-                cv2.rectangle(debug_img, (x + bx, y + by), (x + bx + bw, y + by + bh), (0, 255, 255), 1)
-            
-            end_bar = p_data["debug_boxes"].get("endurance_bar")
-            if end_bar:
-                bx, by, bw, bh = end_bar
-                cv2.rectangle(debug_img, (x + bx, y + by), (x + bx + bw, y + by + bh), (255, 255, 0), 1)
 
-    # Extract Target Data
+    # 2. Target Data
     if target_box:
         x, y, w, h = target_box
-        target_img = screenshot[y:y+h, x:x+w]
-        t_data = extractor.extract_target_data(target_img, target_type)
+        t_data = extractor.extract_target_data(screenshot[y:y+h, x:x+w], target_type)
         results["target"] = t_data
-        
-        # Draw Target Box (Red)
         cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 0, 255), 2)
         cv2.putText(debug_img, f"Target ({target_type})", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+    # 3. Team Data
+    if team_box:
+        x, y, w, h = team_box
+        team_members = extractor.extract_team_data(screenshot[y:y+h, x:x+w], detector.templates)
+        results["team"] = [m.__dict__ for m in team_members]
         
-        # Draw Bar Boxes
-        if t_data.get("debug_boxes"):
-            hp_bar = t_data["debug_boxes"].get("hp_bar")
-            if hp_bar:
-                bx, by, bw, bh = hp_bar
-                cv2.rectangle(debug_img, (x + bx, y + by), (x + bx + bw, y + by + bh), (0, 255, 255), 1)
-            
-            end_bar = t_data["debug_boxes"].get("endurance_bar")
-            if end_bar:
-                bx, by, bw, bh = end_bar
-                cv2.rectangle(debug_img, (x + bx, y + by), (x + bx + bw, y + by + bh), (255, 255, 0), 1)
+        cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 165, 255), 2)
+        cv2.putText(debug_img, "Team Window", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
+        
+        # Draw member slots
+        slot_h = 55
+        for i, member in enumerate(team_members):
+            sy = y + i * slot_h
+            cv2.rectangle(debug_img, (x, sy), (x + w, sy + slot_h), (255, 255, 255), 1)
+            status = "DEAD" if member.is_dead else f"HP:{int(member.hp_pct*100)}%"
+            leader = " (L)" if member.is_leader else ""
+            cv2.putText(debug_img, f"{member.name}{leader} - {status}", (x + 5, sy + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
     # Print Results
     print("\n--- Extracted Data ---")
+    # Custom encoder for TeamMember or just use __dict__
     print(json.dumps(results, indent=2, sort_keys=True))
 
     # Save Debug Image

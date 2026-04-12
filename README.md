@@ -77,3 +77,9 @@ PYENV_VERSION=coh pytest tests/test_perception_dynamic.py
 - **New perceptions:** Add detection methods to `bot/perception/screen_reader.py`.
 - **New actions:** Add methods to `bot/actions/input_handler.py`.
 - **Config tuning:** All tunable parameters live in `config.py`.
+
+
+### Resume Prompting
+```
+Its matching an area too large, spanning too far to the right now. If it help, stop when you see `team_window_right_edge.png`, which is the black background and blue bar at the far right edge of the team window. Anything past this is either background or buffs on team mates
+```

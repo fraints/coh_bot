@@ -90,6 +90,43 @@ class WindowDetector:
         self._last_matched_target_type = "target__none"
         return None
 
+    def find_team_window(self, screenshot: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Finds the team window in the left-middle area.
+        """
+        h, w = screenshot.shape[:2]
+        # Restrict to middle height and left side
+        roi = screenshot[h//4:h//4*3, 0:w//4]
+        offset_x, offset_y = 0, h//4
+
+        best_match = None
+        max_confidence = -1.0
+
+        if "team" in self.templates:
+            match_data = self._get_best_match(roi, self.templates["team"])
+            if match_data:
+                top_loc, top_conf = match_data
+                if top_conf >= 0.45:
+                    win_x = top_loc[0] + offset_x
+                    win_y = top_loc[1] + offset_y
+                    
+                    # Search for bottom anchor to determine height
+                    # Use a generous search region below the top anchor
+                    height = 400 # Fallback
+                    if "bottom_of_team_window" in self.templates:
+                        search_h = min(600, h - win_y)
+                        bottom_roi = screenshot[win_y:win_y + search_h, win_x:min(win_x + 400, w)]
+                        # We use a lower threshold for the bottom anchor (0.4) as requested
+                        # or as needed for translucency.
+                        b_match = self._get_best_match(bottom_roi, self.templates["bottom_of_team_window"])
+                        if b_match and b_match[1] >= 0.4:
+                            # Height is the y-offset within bottom_roi
+                            height = b_match[0][1]
+                    
+                    return (win_x, win_y, 400, int(height))
+
+        return None
+
     def _get_best_match(self, roi: np.ndarray, template: np.ndarray) -> Optional[Tuple[Tuple[int, int], float]]:
         """
         Finds the best match for a template in a ROI.
@@ -110,7 +147,10 @@ class WindowDetector:
         return max_loc, max_val
 
 
-    def get_debug_image(self, screenshot: np.ndarray, player_box: Optional[Tuple[int, int, int, int]], target_box: Optional[Tuple[int, int, int, int]]) -> np.ndarray:
+    def get_debug_image(self, screenshot: np.ndarray, 
+                        player_box: Optional[Tuple[int, int, int, int]], 
+                        target_box: Optional[Tuple[int, int, int, int]],
+                        team_box: Optional[Tuple[int, int, int, int]] = None) -> np.ndarray:
         """Creates a debug copy of the image with colored box outlines."""
         debug_img = screenshot.copy()
         
@@ -125,5 +165,11 @@ class WindowDetector:
             x, y, w, h = target_box
             cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 0, 255), 3)
             cv2.putText(debug_img, "TARGET", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+
+        # Team window: Orange/Yellow
+        if team_box:
+            x, y, w, h = team_box
+            cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 165, 255), 3)
+            cv2.putText(debug_img, "TEAM", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 165, 255), 2)
 
         return debug_img
