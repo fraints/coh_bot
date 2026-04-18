@@ -48,20 +48,42 @@ python main.py
 - **New perceptions:** Add detection methods to `bot/perception/screen_reader.py`.
 - **New actions:** Add methods to `bot/actions/input_handler.py`.
 - **Config tuning:** All tunable parameters live in `config.py`.
+
 ## Diagnostics
 
-The `tools/snapshot_debug.py` script allows you to verify perception logic against static screenshots. It annotates detected UI elements (XP wheel, HP/End bars) with colored bounding boxes.
+The `tools/snapshot_debug.py` script allows you to verify perception logic against static screenshots. It detects and annotates:
+* **Player Bar**: XP wheel, HP/Endurance icons and bars (including fallback logic).
+* **Target Window**: Localization (anchored by Actions button, Corner, or Edge) and Classification (Enemy, Player, NPC, None).
+* **Coordinate Output**: Precise (X, Y) and [WxH] data for every detected element is printed to the console.
 
 ### Usage
 
 ```bash
-# Process all screenshots in the default directory
+# Set up environment
 export PYTHONPATH=$(pwd)
 pyenv activate coh
-python tools/snapshot_debug.py --dir tests/screenshots/full
+
+# Process all standard screenshots
+python tools/snapshot_debug.py --dir tests/screenshots/full --out tests/screenshots/full_annotated
+
+# Process target-specific reference images
+python tools/snapshot_debug.py --dir tests/screenshots/references/target --out tests/screenshots/references/target_annotated
 
 # Process a single specific file
-python tools/snapshot_debug.py --file tests/screenshots/full/team_both_dead.png
+python tools/snapshot_debug.py --file tests/screenshots/full/team_both_dead.png --out ./debug_out
 ```
 
-Annotated images are saved to `tests/screenshots/full_annotated/`. Console output will indicate the exact coordinates and size of detected elements, including whether any fallback logic (e.g., for the endurance bar) was triggered.
+### Legend
+- **Yellow Box**: XP Wheel
+- **White Box**: Player Bar Text Buttons
+- **Green Box**: Health Icon/Bar
+- **Blue Box**: Endurance Icon/Bar
+- **Orange Box**: Target Window Anchors (Actions, Corner, Edge)
+- **Thick Magenta/Orange Outer Box**: Final estimated window boundaries.
+
+### Troubleshooting
+If new UI elements aren't being detected, you can regenerate or add new templates using:
+```bash
+python tools/create_target_templates.py
+```
+This script extracts anchors and icons from the reference images in `tests/screenshots/references/target/`.

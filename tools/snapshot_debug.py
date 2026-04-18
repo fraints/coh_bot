@@ -23,6 +23,9 @@ def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str
     print(f"\nProcessing {os.path.basename(shot_path)}", flush=True)
     detector.cached_boxes.clear()
     windows = detector.detect(img)
+    if windows is None:
+        print(f"  Skipping {os.path.basename(shot_path)}: Image too small or invalid", flush=True)
+        return
     
     # Log all detections
     for k, (x, y, w, h) in windows.items():
@@ -109,6 +112,62 @@ def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str
             
         print(f"  [Target Type] {target_type}", flush=True)
 
+    # --- Team Window Logic ---
+    team_elements = []
+    for k in ["team_top", "team_bottom", "team_dock", "team_close", "chat_top"]:
+        if k in windows:
+            team_elements.append(windows[k])
+            
+    team_box = None
+    if team_elements:
+        tx_min = min(b[0] for b in team_elements)
+        ty_min = min(b[1] for b in team_elements)
+        tx_max = max(b[0] + b[2] for b in team_elements)
+        ty_max = max(b[1] + b[3] for b in team_elements)
+        # Ensure minimum width
+        if tx_max - tx_min < 200:
+            tx_max = tx_min + 220
+        team_box = (tx_min - 5, ty_min - 2, tx_max - tx_min + 10, ty_max - ty_min + 4)
+
+    if team_box:
+        tx, ty, tw, th = team_box
+        print(f"  [Team Window] located at {team_box}", flush=True)
+        cv2.rectangle(img, (tx, ty), (tx+tw, ty+th), (0, 255, 255), 2)
+        cv2.putText(img, "Team", (tx, ty - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        
+        # Detect members inside
+        hp_lefts = detector.detect_all(img, "member_hp", nms_x=20, nms_y=20, threshold=0.6)
+        dead_lefts = detector.detect_all(img, "member_dead", nms_x=20, nms_y=20, threshold=0.6)
+        bar_ends = detector.detect_all(img, "bar_end", nms_x=5, nms_y=5, threshold=0.6)
+        
+        all_lefts = sorted([(b, "Alive") for b in hp_lefts] + [(b, "Dead") for b in dead_lefts], key=lambda x: x[0][1])
+        
+        member_idx = 0
+        for (lx, ly, lw, lh), status in all_lefts:
+            # Strictly left side
+            if tx - 20 <= lx <= tx + 60 and ty <= ly <= ty + th:
+                member_idx += 1
+                
+                # Find matching right edge
+                # right edge should be at same y (within 2px) and to the right
+                best_rx = lx + 120 # Default
+                for rx, ry, rw, rh in bar_ends:
+                    if abs(ry - ly) < 5 and rx > lx:
+                        best_rx = rx + rw
+                        break
+                
+                final_w = best_rx - lx
+                cv2.rectangle(img, (lx, ly), (lx + final_w, ly + lh), (0, 200, 200), 1)
+                cv2.putText(img, f"M{member_idx}: {status}", (lx, ly + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 200, 200), 1)
+                print(f"  [Team Member {member_idx}] {status} at ({lx}, {ly}) width {final_w}", flush=True)
+                
+                # Also look for end bar right below (about 10 pixels below)
+                # We can just draw it as a secondary box if we find another end there
+                for erx, ery, erw, erh in bar_ends:
+                    if 5 < ery - ly < 15 and erx > lx:
+                        cv2.rectangle(img, (lx, ery), (erx + erw, ery + erh), (255, 100, 255), 1) # Purple for end bar
+                        break
+
     # Annotation
     min_x, min_y = 99999, 99999
     max_x, max_y = 0, 0
@@ -126,11 +185,13 @@ def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str
                 color = (255, 0, 0) # Blue
             elif "target_" in k:
                 color = (255, 100, 0) # Orange for target anchors
+            elif "team_" in k:
+                color = (0, 200, 200) # Cyan for team anchors
                 
             cv2.rectangle(img, (x, y), (x+w, y+h), color, 2)
             
             # Only include player bar components in the player window box calculation
-            if not k.startswith("target_"):
+            if not k.startswith("target_") and not k.startswith("team_") and k != "chat_top":
                 min_x = min(min_x, x)
                 min_y = min(min_y, y)
                 max_x = max(max_x, x+w)
@@ -186,6 +247,8 @@ def main():
     player_tpl_dir = 'tests/screenshots/references/player_bar'
     target_tpl_dir = 'tests/screenshots/references/target_anchors'
     
+    team_tpl_dir = 'tests/screenshots/references/team'
+    
     os.makedirs(args.out, exist_ok=True)
     
     # Load templates
@@ -200,7 +263,15 @@ def main():
         "target_none": load_templates([f"{target_tpl_dir}/text_no_target*.png"]),
         "target_archetype": load_templates([f"{target_tpl_dir}/icon_archetype_*.png"]),
         "target_icon_hp": load_templates([f"{target_tpl_dir}/target_icon_hp.png"]),
-        "target_icon_end": load_templates([f"{target_tpl_dir}/target_icon_end.png"])
+        "target_icon_end": load_templates([f"{target_tpl_dir}/target_icon_end.png"]),
+        "team_top": load_templates([f"{team_tpl_dir}/window_top.png"]),
+        "team_bottom": load_templates([f"{team_tpl_dir}/team_bar__*.png"]),
+        "team_dock": load_templates([f"{team_tpl_dir}/dock_button.png"]),
+        "team_close": load_templates([f"{team_tpl_dir}/close_button.png"]),
+        "chat_top": load_templates([f"{team_tpl_dir}/chat_window_top.png"]),
+        "bar_end": load_templates([f"{team_tpl_dir}/bar_end*.png"]),
+        "member_hp": load_templates([f"tests/screenshots/references/team_anchors/member_hp_glimmer.png"]),
+        "member_dead": load_templates([f"tests/screenshots/references/team_anchors/member_dead_glimmer.png"])
     }
     
     detector = TemplateWindowDetector(templates, threshold=0.7)
