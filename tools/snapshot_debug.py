@@ -4,6 +4,7 @@ import os
 import numpy as np
 import argparse
 import logging
+import time
 from bot.perception.window_detector import TemplateWindowDetector
 
 def load_templates(paths: list[str]) -> list:
@@ -15,15 +16,20 @@ def load_templates(paths: list[str]) -> list:
                 ret.append(t)
     return ret
 
-def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str):
+def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str, profile: bool = False):
     img = cv2.imread(shot_path)
     if img is None:
         print(f"Error: Could not read image {shot_path}")
         return
 
     print(f"\nProcessing {os.path.basename(shot_path)}", flush=True)
+    
+    t_start = time.perf_counter()
+    
     detector.cached_boxes.clear()
     windows = detector.detect(img)
+    t_detect = time.perf_counter()
+    
     if windows is None:
         print(f"  Skipping {os.path.basename(shot_path)}: Image too small or invalid", flush=True)
         return
@@ -58,6 +64,7 @@ def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str
             windows["icon_end"] = icon_end
             print(f"  [icon_end] FALLBACK used at ({ex_fallback}, {ey_fallback})", flush=True)
 
+    t_player = time.perf_counter()
     # --- Target Window Logic ---
     target_box = None
     target_type = "Unknown"
@@ -113,6 +120,7 @@ def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str
             
         print(f"  [Target Type] {target_type}", flush=True)
 
+    t_target = time.perf_counter()
     # --- Team Window Logic ---
     team_elements = []
     for k in ["team_top", "team_bottom", "team_dock", "team_close", "chat_top"]:
@@ -319,15 +327,22 @@ def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str
         
         cv2.rectangle(img, (px, py), (px+pw, py+ph), (255, 0, 255), 3)
 
+    t_team = time.perf_counter()
+    
     out_path = os.path.join(out_dir, os.path.basename(shot_path))
     cv2.imwrite(out_path, img)
     print(f"  -> Saved to {out_path}", flush=True)
+    
+    if profile:
+        t_save = time.perf_counter()
+        print(f"  [Timing] Detect: {(t_detect - t_start)*1000:.1f}ms | Player: {(t_player - t_detect)*1000:.1f}ms | Target: {(t_target - t_player)*1000:.1f}ms | Team: {(t_team - t_target)*1000:.1f}ms | Save: {(t_save - t_team)*1000:.1f}ms")
 
 def main():
     parser = argparse.ArgumentParser(description="Diagnostic tool for CoH Bot perception.")
     parser.add_argument("--file", help="Process a single screenshot file")
     parser.add_argument("--dir", default="tests/screenshots/full", help="Process a directory of screenshots")
     parser.add_argument("--out", default="tests/screenshots/full_annotated", help="Output directory")
+    parser.add_argument("--profile", action="store_true", help="Print timing logs for processing bottleneck profiling")
     args = parser.parse_args()
     
     player_tpl_dir = 'tests/screenshots/references/player_bar'
@@ -363,7 +378,7 @@ def main():
     detector = TemplateWindowDetector(templates, threshold=0.7)
     
     if args.file:
-        process_image(args.file, detector, args.out)
+        process_image(args.file, detector, args.out, profile=args.profile)
     else:
         pattern = os.path.join(args.dir, "*.png")
         files = glob.glob(pattern)
@@ -371,7 +386,7 @@ def main():
             print(f"No images found in {args.dir}")
             return
         for f in files:
-            process_image(f, detector, args.out)
+            process_image(f, detector, args.out, profile=args.profile)
 
 if __name__ == '__main__':
     main()
