@@ -1,6 +1,7 @@
 import cv2
 import glob
 import os
+import numpy as np
 import argparse
 import logging
 from bot.perception.window_detector import TemplateWindowDetector
@@ -120,14 +121,38 @@ def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str
             
     team_box = None
     if team_elements:
-        tx_min = min(b[0] for b in team_elements)
-        ty_min = min(b[1] for b in team_elements)
-        tx_max = max(b[0] + b[2] for b in team_elements)
-        ty_max = max(b[1] + b[3] for b in team_elements)
-        # Ensure minimum width
-        if tx_max - tx_min < 200:
-            tx_max = tx_min + 220
-        team_box = (tx_min - 5, ty_min - 2, tx_max - tx_min + 10, ty_max - ty_min + 4)
+        dock = windows.get("team_dock")
+        close = windows.get("team_close")
+        
+        # Determine X bounds strictly from dock and close, ignoring team_top noise
+        tx_min = None
+        tx_max = None
+        
+        if dock and close:
+            tx_min = dock[0] - 15  # dock is slightly inset
+            tx_max = close[0] + close[2] + 15
+        elif dock and not close:
+            tx_min = dock[0] - 15
+            tx_max = tx_min + 225 # default assumption
+        elif close and not dock:
+            tx_max = close[0] + close[2] + 15
+            tx_min = tx_max - 225
+            
+        if tx_min is not None and tx_max is not None:
+            # We have valid reliable horizontal bounds! Now determine Y.
+            ty_min = dock[1] if dock else close[1]
+            ty_min -= 5 # header top cushion
+            
+            team_bottom_y = ty_min + 600 # Fallback
+            if "team_bottom" in windows:
+                bty = windows["team_bottom"][1]
+                # sanity check that it belongs to this box
+                if tx_min - 50 < windows["team_bottom"][0] < tx_max + 50 and bty > ty_min:
+                    team_bottom_y = bty
+            
+            tw = tx_max - tx_min
+            th = max(50, team_bottom_y - ty_min)
+            team_box = (tx_min, ty_min, tw, th)
 
     if team_box:
         tx, ty, tw, th = team_box
@@ -135,38 +160,99 @@ def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str
         cv2.rectangle(img, (tx, ty), (tx+tw, ty+th), (0, 255, 255), 2)
         cv2.putText(img, "Team", (tx, ty - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         
-        # Detect members inside
-        hp_lefts = detector.detect_all(img, "member_hp", nms_x=20, nms_y=20, threshold=0.6)
-        dead_lefts = detector.detect_all(img, "member_dead", nms_x=20, nms_y=20, threshold=0.6)
-        bar_ends = detector.detect_all(img, "bar_end", nms_x=5, nms_y=5, threshold=0.6)
+        # We need to manually find the members using pure slices instead of large templates
+        # owing to JPEG artifacts breaking larger structural matches.
         
-        all_lefts = sorted([(b, "Alive") for b in hp_lefts] + [(b, "Dead") for b in dead_lefts], key=lambda x: x[0][1])
+        slice_hp = cv2.imread('tests/screenshots/references/team/slice_hp.png')
+        slice_hp_yellow = cv2.imread('tests/screenshots/references/team/slice_hp_yellow.png')
         
-        member_idx = 0
-        for (lx, ly, lw, lh), status in all_lefts:
-            # Strictly left side
-            if tx - 20 <= lx <= tx + 60 and ty <= ly <= ty + th:
-                member_idx += 1
+        # ROI for searching to prevent false positives across the screen
+        roi_x1 = max(0, tx)
+        roi_y1 = max(0, ty)
+        roi_x2 = min(img.shape[1], tx + tw)
+        roi_y2 = min(img.shape[0], ty + th)  # Strongly constrained above team_bottom
+        roi = img[roi_y1:roi_y2, roi_x1:roi_x2]
+        
+        ys = []
+        if slice_hp is not None and roi.shape[0] > 0 and roi.shape[1] > 0:
+            res = cv2.matchTemplate(roi, slice_hp, cv2.TM_CCOEFF_NORMED)
+            ys.extend([pt[1] + roi_y1 for pt in zip(*np.where(res >= 0.8)[::-1])])
+            
+        if slice_hp_yellow is not None and roi.shape[0] > 0 and roi.shape[1] > 0:
+            res = cv2.matchTemplate(roi, slice_hp_yellow, cv2.TM_CCOEFF_NORMED)
+            ys.extend([pt[1] + roi_y1 for pt in zip(*np.where(res >= 0.8)[::-1])])
+            
+        # NMS for exact Ys (filter close duplicates)
+        ys = sorted(list(set(ys)))
+        filtered_ys = []
+        for y in ys:
+            if not filtered_ys or y - filtered_ys[-1] > 10:
+                filtered_ys.append(y)
                 
-                # Find matching right edge
-                # right edge should be at same y (within 2px) and to the right
-                best_rx = lx + 120 # Default
-                for rx, ry, rw, rh in bar_ends:
-                    if abs(ry - ly) < 5 and rx > lx:
-                        best_rx = rx + rw
+        # Extrapolate slots mathematically downwards to guarantee we catch completely dead members
+        all_members = []
+        if team_box is not None:
+            # Leader is firmly anchored ~29px below the dock/close button horizontal line
+            start_y = ty + 29
+            if filtered_ys and filtered_ys[0] < start_y + 10:
+                start_y = filtered_ys[0]
+                
+            current_y = float(start_y)
+            idx = 0
+            
+            while current_y + 18 < team_bottom_y - 5:
+                # Limit to 8 max members.
+                if idx >= 8:
+                    break
+                    
+                is_leader = (idx == 0)
+                status = "Dead"
+                
+                # Check if this mathematical slot aligns with an active HP slice
+                for y in filtered_ys:
+                    if abs(y - current_y) <= 8:
+                        status = "Alive"
+                        current_y = float(y) # Snap to the actual true Y to prevent vertical drift
                         break
+                        
+                all_members.append((tx, int(current_y), 0, 18, status, is_leader))
                 
-                final_w = best_rx - lx
-                cv2.rectangle(img, (lx, ly), (lx + final_w, ly + lh), (0, 200, 200), 1)
-                cv2.putText(img, f"M{member_idx}: {status}", (lx, ly + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 200, 200), 1)
-                print(f"  [Team Member {member_idx}] {status} at ({lx}, {ly}) width {final_w}", flush=True)
-                
-                # Also look for end bar right below (about 10 pixels below)
-                # We can just draw it as a secondary box if we find another end there
-                for erx, ery, erw, erh in bar_ends:
-                    if 5 < ery - ly < 15 and erx > lx:
-                        cv2.rectangle(img, (lx, ery), (erx + erw, ery + erh), (255, 100, 255), 1) # Purple for end bar
-                        break
+                # Next slot - 31.5 handles alternating 31 / 32 pixel gaps perfectly
+                current_y += 31.5 
+                idx += 1
+        
+        # Find right edge of the bar (flush across all members)
+        # It's at a fixed offset from team_close if it exists, else from the right side of window
+        shared_rx = tx + tw - 47
+        team_close_matches = detector.detect_all(img, "team_close", nms_x=10, threshold=0.7)
+        for (cx, cy, cw, ch) in team_close_matches:
+            if tx < cx < tx + tw and ty < cy < ty + 50: # Close is near top
+                shared_rx = cx - 22
+                break
+
+        for member_idx, (lx, ly, lw, lh, status, is_leader) in enumerate(all_members, 1):
+            
+            # Left edge
+            expected_start_x = tx + 1 if is_leader else tx + 15
+            bar_start_x = tx + 2 if is_leader else tx + 14
+            
+            bar_width = shared_rx - bar_start_x
+            if bar_width < 50:
+                bar_width = 160
+            
+            # HP Bar
+            cv2.rectangle(img, (bar_start_x, ly), (bar_start_x + bar_width, ly + lh), (0, 255, 0), 1) # HP Green
+            cv2.putText(img, f"M{member_idx}: {status}", (bar_start_x, ly + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+            
+            # END Bar (approx 18px below ly)
+            # Actually, standard layout has END bar vertically right under HP.
+            end_y = ly + 14
+            end_h = 4
+            cv2.rectangle(img, (bar_start_x, end_y), (bar_start_x + bar_width, end_y + end_h), (255, 0, 0), 1) # END Blue
+
+            print(f"  [Team Member {member_idx}] {status} at ({bar_start_x}, {ly}) bounds: {bar_width}w", flush=True)
+
+  
 
     # Annotation
     min_x, min_y = 99999, 99999

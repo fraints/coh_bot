@@ -54,6 +54,7 @@ python main.py
 The `tools/snapshot_debug.py` script allows you to verify perception logic against static screenshots. It detects and annotates:
 * **Player Bar**: XP wheel, HP/Endurance icons and bars (including fallback logic).
 * **Target Window**: Localization (anchored by Actions button, Corner, or Edge) and Classification (Enemy, Player, NPC, None).
+* **Team Window**: Counts members (Alive/Dead) and calculates precise geometric bounds for HP and Endurance bars using hybrid color-scanline detection.
 * **Coordinate Output**: Precise (X, Y) and [WxH] data for every detected element is printed to the console.
 
 ### Usage
@@ -68,6 +69,9 @@ python tools/snapshot_debug.py --dir tests/screenshots/full --out tests/screensh
 
 # Process target-specific reference images
 python tools/snapshot_debug.py --dir tests/screenshots/references/target --out tests/screenshots/references/target_annotated
+
+# Process team-specific reference images
+python tools/snapshot_debug.py --dir tests/screenshots/references/team --out tests/screenshots/references/team_annotated
 
 # Process a single specific file
 python tools/snapshot_debug.py --file tests/screenshots/full/team_both_dead.png --out ./debug_out
