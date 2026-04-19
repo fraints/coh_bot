@@ -127,222 +127,32 @@ def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str
 
     t_target = time.perf_counter()
     # --- Team Window Logic ---
-    team_elements = []
-    for k in ["team_top", "team_bottom", "team_dock", "team_close", "chat_top"]:
-        if k in windows:
-            team_elements.append(windows[k])
-            
-    team_box = None
-    team_box = None
-    if team_elements:
-        # Use detect_all for dock and close so we can find a matching PAIR on the same window,
-        # instead of blindly trusting the single highest-confidence match (which can false positive).
-        all_docks = detector.detect_all(img, "team_dock", nms_x=10, threshold=0.7)
-        all_closes = detector.detect_all(img, "team_close", nms_x=10, threshold=0.7)
-        all_bottoms = detector.detect_all(img, "team_bottom", nms_x=10, threshold=0.7)
-        
-        candidates = []
-        
-        # Target distance between dock and close is ~176px
-        TARGET_DIST = 176
-        
-        # Find all dock+close pairs that are within a reasonable range
-        for d in all_docks:
-            for c in all_closes:
-                dx = abs(d[0] - c[0])
-                if 100 < dx < 250: # Standard team window range
-                    # Score based on proximity to target distance
-                    dist_err = abs(dx - TARGET_DIST)
-                    
-                    # Check if there is an associated team_bottom button in this X range
-                    # (Strictly speaking, team_bottom doesn't have to be found, but it's a strong signal)
-                    tx_min = d[0] - 15
-                    tx_max = c[0] + c[2] + 15
-                    
-                    has_bottom = False
-                    for b in all_bottoms:
-                        if tx_min - 20 <= b[0] <= tx_max + 20 and b[1] > d[1]:
-                            has_bottom = True
-                            break
-                    
-                    # Store candidate with its score
-                    score = dist_err
-                    if not has_bottom:
-                        score += 500 # Heavy penalty for no bottom bar
-                    
-                    candidates.append({
-                        "dock": d,
-                        "close": c,
-                        "score": score,
-                        "tx_min": tx_min,
-                        "tx_max": tx_max,
-                        "has_bottom": has_bottom
-                    })
-                    
-        # Sort by best score (lowest)
-        candidates.sort(key=lambda x: x["score"])
-        
-        dock = None
-        close = None
-        
-        # Only accept candidates that have an associated bottom bar (high confidence)
-        # or at least a very good distance match if non-optional.
-        if candidates and candidates[0]["has_bottom"]:
-            best = candidates[0]
-            dock = best["dock"]
-            close = best["close"]
-            tx_min = best["tx_min"]
-            tx_max = best["tx_max"]
-        else:
-            # Fallback to single anchors if NO pair with bottom found, 
-            # but ONLY if there's high confidence.
-            # In most cases, if there's no bottom bar, it's not a team window.
-            tx_min, tx_max = None, None
-            
-        if tx_min is not None and tx_max is not None:
-            # We have valid reliable horizontal bounds! Now determine Y.
-            ty_min = dock[1] if dock else close[1]
-            ty_min -= 5 # header top cushion
-            
-            # Find the LOWEST team_bottom for THIS specific window to get the full height
-            team_bottom_y = ty_min + 600 # Fallback
-            best_b = None
-            for b in all_bottoms:
-                if tx_min - 50 < b[0] < tx_max + 50 and b[1] > ty_min:
-                    if best_b is None or b[1] > best_b[1]:
-                        best_b = b
-            
-            if best_b:
-                print(f"  [team_bottom] using match at ({best_b[0]}, {best_b[1]}) for window height", flush=True)
-                team_bottom_y = best_b[1]
-            
-            # Hard ceiling: window can't extend beyond image height
-            team_bottom_y = min(team_bottom_y, img.shape[0])
-            
-            tw = tx_max - tx_min
-            th = max(50, team_bottom_y - ty_min)
-            team_box = (tx_min, ty_min, tw, th)
-
-    if team_box:
-        tx, ty, tw, th = team_box
-        print(f"  [Team Window] located at {team_box}", flush=True)
-        cv2.rectangle(img, (tx, ty), (tx+tw, ty+th), (0, 255, 255), 2)
-        cv2.putText(img, "Team", (tx, ty - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        
-        # We need to manually find the members using pure slices instead of large templates
-        # owing to JPEG artifacts breaking larger structural matches.
-        
-        slice_hp = cv2.imread('tests/screenshots/references/team/slice_hp.png')
-        slice_hp_yellow = cv2.imread('tests/screenshots/references/team/slice_hp_yellow.png')
-        slice_end = cv2.imread('tests/screenshots/references/team/slice_end.png')
-        
-        # ROI for searching to prevent false positives across the screen
-        roi_x1 = max(0, tx)
-        roi_y1 = max(0, ty)
-        roi_x2 = min(img.shape[1], tx + tw)
-        roi_y2 = min(img.shape[0], ty + th)  # Strongly constrained above team_bottom
-        roi = img[roi_y1:roi_y2, roi_x1:roi_x2]
-        
-        ys_hp = []
-        ys_end = []
-        threshold_slice = 0.75  # slightly relaxed to handle JPEG compression at window edges
-        if slice_hp is not None and roi.shape[0] > 0 and roi.shape[1] > 0:
-            res = cv2.matchTemplate(roi, slice_hp, cv2.TM_CCOEFF_NORMED)
-            ys_hp.extend([pt[1] + roi_y1 for pt in zip(*np.where(res >= threshold_slice)[::-1])])
-            
-        if slice_hp_yellow is not None and roi.shape[0] > 0 and roi.shape[1] > 0:
-            res = cv2.matchTemplate(roi, slice_hp_yellow, cv2.TM_CCOEFF_NORMED)
-            ys_hp.extend([pt[1] + roi_y1 for pt in zip(*np.where(res >= threshold_slice)[::-1])])
-
-        if slice_end is not None and roi.shape[0] > 0 and roi.shape[1] > 0:
-            res = cv2.matchTemplate(roi, slice_end, cv2.TM_CCOEFF_NORMED)
-            ys_end.extend([pt[1] + roi_y1 for pt in zip(*np.where(res >= threshold_slice)[::-1])])
-            
-        # NMS for exact Ys (filter close duplicates)
-        ys_hp = sorted(list(set(ys_hp)))
-        filtered_ys = []
-        for y in ys_hp:
-            if not filtered_ys or y - filtered_ys[-1] > 10:
-                filtered_ys.append(y)
-                
-        # Extrapolate slots mathematically downwards to guarantee we catch completely dead members
-        all_members = []
-        if team_box is not None:
-            # Leader is firmly anchored ~34px below the dock/close button header line
-            # (Matches team1/team2 "great" spacing)
-            start_y = ty + 34
-            
-            # Snap to a real HP slice ONLY if it's within a tight tolerance of the expected anchor
-            # (Prevents matching Archetype icons or other green noise in the header)
-            best_snap = None
-            for y in filtered_ys:
-                if abs(y - start_y) <= 10:
-                    best_snap = y
-                    break
-            if best_snap:
-                start_y = best_snap
-                
-            current_y = float(start_y)
-            idx = 0
-            
-            while current_y + 26 < team_bottom_y:
-                # Limit to 8 max members.
-                if idx >= 8:
-                    break
-                    
-                is_leader = (idx == 0)
-                status = "Dead"
-                
-                # Check if this mathematical slot aligns with an active HP slice
-                for y in filtered_ys:
-                    if abs(y - current_y) <= 8:
-                        status = "Alive"
-                        current_y = float(y) # Snap to the actual true Y to prevent vertical drift
-                        break
-                
-                # Try to find a matching endurance bar for this slot
-                found_end_y = None
-                for ey in ys_end:
-                    if 18 <= (ey - current_y) <= 24:
-                        found_end_y = ey
-                        break
-                        
-                all_members.append((tx, int(current_y), 0, 18, status, is_leader, found_end_y))
-                
-                # Next slot - 31.5 handles alternating 31 / 32 pixel gaps perfectly
-                current_y += 31.5 
-                idx += 1
-        
-        # Find right edge of the bar (flush across all members)
-        # It's at a fixed offset from team_close if it exists, else from the right side of window
-        shared_rx = tx + tw - 47
-        team_close_matches = detector.detect_all(img, "team_close", nms_x=10, threshold=0.7)
-        for (cx, cy, cw, ch) in team_close_matches:
-            if tx < cx < tx + tw and ty < cy < ty + 50: # Close is near top
-                shared_rx = cx - 22
-                break
+    ref_dir = os.path.join(os.path.dirname(__file__), "..", "tests", "screenshots", "references")
+    from bot.perception.extractors.team_window import TeamWindowExtractor
+    team_extractor = TeamWindowExtractor(detector, ref_dir)
+    team_results = team_extractor.extract_team(img)
+    
+    if team_results:
+        # Drawing just for the first member to frame the window
+        _, first_layout = team_results[0]
+        tx, ty, _, _ = first_layout.hp_bar_box
+        # We don't have the full window box anymore, but we can infer it or just draw members
         
         # Draw the members
-        for member_idx, (lx, ly, lw, lh, status, is_leader, found_end_y) in enumerate(all_members, 1):
+        for member_idx, (member, layout) in enumerate(team_results, 1):
+            lx, ly, lw, lh = layout.hp_bar_box
+            ex, ey, ew, eh = layout.end_bar_box
             
-            # Left edge
-            bar_start_x = tx + 2 if is_leader else tx + 14
-            
-            bar_width = shared_rx - bar_start_x
-            if bar_width < 50:
-                bar_width = 160
+            status = member.status
             
             # HP Bar
-            cv2.rectangle(img, (bar_start_x, ly), (bar_start_x + bar_width, ly + 17), (0, 255, 0), 1) # HP Green (17px tall)
-            cv2.putText(img, f"M{member_idx}: {status}", (bar_start_x, ly + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+            cv2.rectangle(img, (lx, ly), (lx + lw, ly + lh), (0, 255, 0), 1) # HP Green
+            cv2.putText(img, f"M{member_idx}: {status}", (lx, ly + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
             
-            # END Bar: immediately below HP bar
-            # If we found an endurance slice, use its Y. Otherwise, use offset.
-            # Real offset seems to be around +20 or +21 to be below the HP border.
-            ey = found_end_y if found_end_y is not None else ly + 21
-            cv2.rectangle(img, (bar_start_x, ey), (bar_start_x + bar_width, ey + 7), (255, 0, 0), 1) # Blue
+            # END Bar
+            cv2.rectangle(img, (lx, ey), (lx + lw, ey + eh), (255, 0, 0), 1) # Blue
 
-            print(f"  [Team Member {member_idx}] {status} at ({bar_start_x}, {ly}) end_y={ey} bounds: {bar_width}w", flush=True)
+            print(f"  [Team Member {member_idx}] {status} at ({lx}, {ly}) end_y={ey} bounds: {lw}w", flush=True)
 
   
 
@@ -423,7 +233,7 @@ def process_image(shot_path: str, detector: TemplateWindowDetector, out_dir: str
 
 def main():
     parser = argparse.ArgumentParser(description="Diagnostic tool for CoH Bot perception.")
-    parser.add_argument("--file", help="Process a single screenshot file")
+    parser.add_argument("--file", nargs='+', help="Process one or more screenshot files")
     parser.add_argument("--dir", default="tests/screenshots/full", help="Process a directory of screenshots")
     parser.add_argument("--out", default="tests/screenshots/full_annotated", help="Output directory")
     parser.add_argument("--profile", action="store_true", help="Print timing logs for processing bottleneck profiling")
@@ -462,7 +272,8 @@ def main():
     detector = TemplateWindowDetector(templates, threshold=0.7)
     
     if args.file:
-        process_image(args.file, detector, args.out, profile=args.profile)
+        for f in args.file:
+            process_image(f, detector, args.out, profile=args.profile)
     else:
         pattern = os.path.join(args.dir, "*.png")
         files = glob.glob(pattern)
